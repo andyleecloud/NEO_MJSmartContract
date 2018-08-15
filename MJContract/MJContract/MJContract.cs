@@ -12,20 +12,25 @@ namespace MJContract
         delegate object deleDyncall(string method, object[] arr);
 
         public delegate void deleTransfer(byte[] from, byte[] to, BigInteger value);
+
         [DisplayName("transfer")]
         public static event deleTransfer Transferred;
+        public delegate void deleRefundTarget(byte[] txid, byte[] who);
+        [DisplayName("onRefundTarget")]
+        public static event deleRefundTarget onRefundTarget;
+
+        private static readonly byte[] gas_asset_id = Neo.SmartContract.Framework.Helper.HexToBytes("e72d286979ee6cb1b7e65dfddfb2e384100b8d148e7758de42e4168b71792c60");
 
         public static readonly byte[] ContractOwner = "ANQUmFnn9psTnCYSSZ5nuNCGZ1LWSmwHF4".ToScriptHash();
 
         public static readonly byte[] MintOwner = "ANQUmFnn9psTnCYSSZ5nuNCGZ1LWSmwHF4".ToScriptHash();
 
-        private const ulong supplytotalcount = 888888888;
+        private const ulong supplytotalcount = 99999999;
 
         public static string symbol()
         {
             return "MJC";
         }
-
         public static string Name()
         {
             return "MJC";
@@ -34,7 +39,6 @@ namespace MJContract
         {
             return 0;
         }
-
         public static string Version()
         {
             return "1.0.0";
@@ -46,48 +50,22 @@ namespace MJContract
             public BigInteger value;
         }
 
-        public static BigInteger totalExchargeSgas()
-        {
-            return Storage.Get(Storage.CurrentContext, "totalExchargeSgas").AsBigInteger();
-        }
-
-        private static void _addTotal(BigInteger count)
-        {
-            BigInteger total = Storage.Get(Storage.CurrentContext, "totalExchargeSgas").AsBigInteger();
-            total += count;
-            Storage.Put(Storage.CurrentContext, "totalExchargeSgas", total);
-        }
-
-        private static void _subTotal(BigInteger count)
-        {
-            BigInteger total = Storage.Get(Storage.CurrentContext, "totalExchargeSgas").AsBigInteger();
-            total -= count;
-            if (total > 0)
-            {
-                Storage.Put(Storage.CurrentContext, "totalExchargeSgas", total);
-            }
-            else
-            {
-
-                Storage.Delete(Storage.CurrentContext, "totalExchargeSgas");
-            }
-        }
-
         private static byte[] concatKey(string s1, string s2)
         {
             return s1.AsByteArray().Concat(s2.AsByteArray());
         }
-
+        public static BigInteger _totalSupply()
+        {
+            return Storage.Get(Storage.CurrentContext, "totalSupply").AsBigInteger();
+        }
         public static BigInteger totalSupply()
         {
             return Storage.Get(Storage.CurrentContext, "totalExchargeMJC").AsBigInteger();
         }
-
         public static BigInteger Supplying()
         {
             return Storage.Get(Storage.CurrentContext, "supplying").AsBigInteger();
         }
-
         private static void _subSupplying(BigInteger count)
         {
             BigInteger supplying = Storage.Get(Storage.CurrentContext, "supplying").AsBigInteger();
@@ -101,59 +79,174 @@ namespace MJContract
                 Storage.Delete(Storage.CurrentContext, "supplying");
             }
         }
-
         private static void _addSupplying(BigInteger count)
         {
             BigInteger supplying = Storage.Get(Storage.CurrentContext, "supplying").AsBigInteger();
             supplying += count;
             Storage.Put(Storage.CurrentContext, "supplying", supplying);
         }
-
         public static bool Deploy()
         {
             byte[] total_supply = Storage.Get(Storage.CurrentContext, "totalExchargeMJC");
             if (total_supply.Length != 0) return false;
-            Storage.Put(Storage.CurrentContext, ExecutionEngine.ExecutingScriptHash, supplytotalcount);
+            Storage.Put(Storage.CurrentContext, ContractOwner, supplytotalcount);
             Storage.Put(Storage.CurrentContext, "totalExchargeMJC", supplytotalcount);
-            Transferred(null, ExecutionEngine.ExecutingScriptHash, supplytotalcount);
+            Transferred(null, ContractOwner, supplytotalcount);
             return true;
         }
-
-        public static BigInteger balanceOf_Sgas(byte[] address)
-        {
-            var key = new byte[] { 0x11 }.Concat(address);
-            return Storage.Get(Storage.CurrentContext, key).AsBigInteger();
-        }
-
         public static BigInteger balanceOf(byte[] account)
         {
             return Storage.Get(Storage.CurrentContext, account).AsBigInteger();
         }
-
-        public static bool transfer(byte[] from, byte[] to, BigInteger value)
+        public static bool mintTokens()
         {
-            if (value <= 0) return false;
-            if (from.Length != 20) return false;
-            if (to.Length != 20) return false;
+            var tx = ExecutionEngine.ScriptContainer as Transaction;
 
-            BigInteger from_value = Storage.Get(Storage.CurrentContext, from).AsBigInteger();
-            if (from_value < value) return false;
-            if (from == to) return true;
-            if (from_value == value)
-                Storage.Delete(Storage.CurrentContext, from);
-            else
-                Storage.Put(Storage.CurrentContext, from, from_value - value);
+            byte[] who = null;
+            TransactionOutput[] reference = tx.GetReferences();
+            for (var i = 0; i < reference.Length; i++)
+            {
+                if (reference[i].AssetId.AsBigInteger() == gas_asset_id.AsBigInteger())
+                {
+                    who = reference[i].ScriptHash;
+                    break;
+                }
+            }
 
-            BigInteger to_value = Storage.Get(Storage.CurrentContext, to).AsBigInteger();
-            Storage.Put(Storage.CurrentContext, to, to_value + value);
+            var lastTx = Storage.Get(Storage.CurrentContext, "lastTx");
+            if (lastTx.Length > 0 && tx.Hash == lastTx)
+                return false;
+            Storage.Put(Storage.CurrentContext, "lastTx", tx.Hash);
 
-            setTxInfo(from, to, value);
-            Transferred(from, to, value);
+            TransactionOutput[] outputs = tx.GetOutputs();
+            ulong value = 0;
+            foreach (TransactionOutput output in outputs)
+            {
+                if (output.ScriptHash == ExecutionEngine.ExecutingScriptHash &&
+                    output.AssetId.AsBigInteger() == gas_asset_id.AsBigInteger())
+                {
+                    value += (ulong)output.Value;
+                }
+            }
+            value = value / 100000000;
+            var total_supply = Storage.Get(Storage.CurrentContext, "totalSupply").AsBigInteger();
+            total_supply += value;
+            Storage.Put(Storage.CurrentContext, "totalSupply", total_supply);
+            _saveGas(who, value, 0);
+            return transfer(ContractOwner, who, value);
+        }
+        public static bool refund(byte[] who)
+        {
+            var tx = ExecutionEngine.ScriptContainer as Transaction;
+            var outputs = tx.GetOutputs();
+            if (outputs[0].AssetId.AsBigInteger() != gas_asset_id.AsBigInteger())
+                return false;
+            if (outputs[0].ScriptHash.AsBigInteger() != ExecutionEngine.ExecutingScriptHash.AsBigInteger())
+                return false;
+
+            byte[] target = getRefundTarget(tx.Hash);
+            if (target.Length > 0)
+                return false;
+
+            var count = outputs[0].Value;
+            count = count / 100000000;
+            bool b = transfer(who, ContractOwner, count);
+            if (!b)
+                return false;
+
+            byte[] coinid = tx.Hash.Concat(new byte[] { 0, 0 });
+            Storage.Put(Storage.CurrentContext, coinid, who);
+            onRefundTarget(tx.Hash, who);
+
+            var total_supply = Storage.Get(Storage.CurrentContext, "totalSupply").AsBigInteger();
+            total_supply -= count;
+            Storage.Put(Storage.CurrentContext, "totalSupply", total_supply);
+            _saveGas(who, count, 1);
             return true;
         }
 
+        public static byte[] getRefundTarget(byte[] txid)
+        {
+            byte[] coinid = txid.Concat(new byte[] { 0, 0 });
+            byte[] target = Storage.Get(Storage.CurrentContext, coinid);
+            return target;
+        }
+        public static void _saveGas(byte[] account, BigInteger value, BigInteger type)
+        {
+            var key = concatKey("gas/", account.AsString());
+            var userGas = Storage.Get(Storage.CurrentContext, key).AsBigInteger();
+            if (type == 0)
+            {
+                userGas += value;
+            }
+            else
+            {
+                userGas -= value;
+            }
+            Storage.Put(Storage.CurrentContext, key, userGas);
+        }
+        public static BigInteger _getGas(byte[] account)
+        {
+            var key = concatKey("gas/", account.AsString());
+            return Storage.Get(Storage.CurrentContext, key).AsBigInteger();
+        }
+        public static bool transfer(byte[] from, byte[] to, BigInteger value)
+        {
+            if (value <= 0) return false;
+            value = value * 10;
+            if (from.Length > 0)
+            {
+                BigInteger from_value = Storage.Get(Storage.CurrentContext, from).AsBigInteger();
+                if (from_value < value) return false;
+                if (from_value == value)
+                    Storage.Delete(Storage.CurrentContext, from);
+                else
+                    Storage.Put(Storage.CurrentContext, from, from_value - value);
+            }
+            if (to.Length > 0)
+            {
+                BigInteger to_value = Storage.Get(Storage.CurrentContext, to).AsBigInteger();
+                Storage.Put(Storage.CurrentContext, to, to_value + value);
+            }
+            setTxInfo(from, to, value);
+            Transferred(from, to, value);
+            saveSupply(from, to, value);
+            return true;
+        }
+        public static bool transferFrom_app(byte[] from, byte[] to, BigInteger value)
+        {
+            if (value <= 0) return false;
+            if (from.Length > 0)
+            {
+                BigInteger from_value = Storage.Get(Storage.CurrentContext, from).AsBigInteger();
+                if (from_value < value) return false;
+                if (from_value == value)
+                    Storage.Delete(Storage.CurrentContext, from);
+                else
+                    Storage.Put(Storage.CurrentContext, from, from_value - value);
+            }
+            if (to.Length > 0)
+            {
+                BigInteger to_value = Storage.Get(Storage.CurrentContext, to).AsBigInteger();
+                Storage.Put(Storage.CurrentContext, to, to_value + value);
+            }
+            setTxInfo(from, to, value);
+            Transferred(from, to, value);
+            saveSupply(from, to, value);
+            return true;
+        }
         static readonly byte[] doublezero = new byte[2] { 0x00, 0x00 };
-
+        private static void saveSupply(byte[] from, byte[] to, BigInteger value)
+        {
+            if (from == ContractOwner)
+            {
+                _addSupplying(value);
+            }
+            else if (to == ContractOwner)
+            {
+                _subSupplying(value);
+            }
+        }
         private static void setTxInfo(byte[] from, byte[] to, BigInteger value)
         {
             TransferInfo info = new TransferInfo();
@@ -199,229 +292,20 @@ namespace MJContract
             seek += 2;
             info.value = v.Range(seek, valuelen).AsBigInteger();
             return info;
-            //return Helper.Deserialize(v) as TransferInfo;
-        }
-
-        public static bool changeSupply(byte[] txid)
-        {
-            var transferinfo = getTXInfo(txid);
-            if (transferinfo == null) return false;
-            if (transferinfo.from == transferinfo.to) return false;
-
-            if (transferinfo.from == ExecutionEngine.ExecutingScriptHash)
-                _addSupplying(transferinfo.value);
-
-            if (transferinfo.to == ExecutionEngine.ExecutingScriptHash)
-                _subSupplying(transferinfo.value);
-
-            return true;
-        }
-
-        public static bool hasAlreadyCharged(byte[] txid)
-        {
-            byte[] keytxid = new byte[] { 0x12 }.Concat(txid);
-            byte[] txinfo = Storage.Get(Storage.CurrentContext, keytxid);
-            if (txinfo.Length > 0)
-            {
-                return false;
-            }
-            return true;
-        }
-
-        public static bool rechargeToken(byte[] owner, byte[] txid)
-        {
-            if (owner.Length != 20)
-            {
-                Runtime.Log("Owner error.");
-                return false;
-            }
-            var keytxid = new byte[] { 0x12 }.Concat(txid);
-            byte[] txinfo = Storage.Get(Storage.CurrentContext, keytxid);
-            if (txinfo.Length > 0) return false;
-
-            object[] args = new object[1] { txid };
-            byte[] sgasHash = Storage.Get(Storage.CurrentContext, "sgas");
-            deleDyncall dyncall = (deleDyncall)sgasHash.ToDelegate();
-            object[] res = (object[])dyncall("getTXInfo", args);
-
-            if (res.Length > 0)
-            {
-                byte[] from = (byte[])res[0];
-                byte[] to = (byte[])res[1];
-                BigInteger value = (BigInteger)res[2];
-
-                if (from == owner)
-                {
-                    if (to == ExecutionEngine.ExecutingScriptHash)
-                    {
-                        Storage.Put(Storage.CurrentContext, keytxid, value);
-
-                        BigInteger nMoney = 0;
-                        var keytowner = new byte[] { 0x11 }.Concat(owner);
-                        byte[] ownerMoney = Storage.Get(Storage.CurrentContext, keytowner);
-                        if (ownerMoney.Length > 0)
-                        {
-                            nMoney = ownerMoney.AsBigInteger();
-                        }
-                        nMoney += value;
-
-                        _addTotal(value);
-
-                        Storage.Put(Storage.CurrentContext, keytowner, nMoney.AsByteArray());
-                        return true;
-                    }
-                }
-            }
-            return false;
-        }
-
-        public static bool drawToken(byte[] sender, BigInteger count)
-        {
-            if (sender.Length != 20)
-            {
-                Runtime.Log("Owner error.");
-                return false;
-            }
-            var keytsender = new byte[] { 0x11 }.Concat(sender);
-
-            if (Runtime.CheckWitness(sender))
-            {
-                BigInteger nMoney = 0;
-                byte[] ownerMoney = Storage.Get(Storage.CurrentContext, keytsender);
-                if (ownerMoney.Length > 0)
-                {
-                    nMoney = ownerMoney.AsBigInteger();
-                }
-                if (count <= 0 || count > nMoney)
-                {
-
-                    count = nMoney;
-                }
-
-                object[] args = new object[3] { ExecutionEngine.ExecutingScriptHash, sender, count };
-                byte[] sgasHash = Storage.Get(Storage.CurrentContext, "sgas");
-                deleDyncall dyncall = (deleDyncall)sgasHash.ToDelegate();
-                bool res = (bool)dyncall("transfer_app", args);
-                if (!res)
-                {
-                    return false;
-                }
-
-                nMoney -= count;
-
-                _subTotal(count);
-
-                if (nMoney > 0)
-                {
-                    Storage.Put(Storage.CurrentContext, keytsender, nMoney.AsByteArray());
-                }
-                else
-                {
-                    Storage.Delete(Storage.CurrentContext, keytsender);
-                }
-
-                return true;
-            }
-            return false;
-        }
-
-        public static bool drawToContractOwner(BigInteger count)
-        {
-            if (Runtime.CheckWitness(ContractOwner))
-            {
-                BigInteger nMoney = 0;
-
-                object[] args = new object[1] { ExecutionEngine.ExecutingScriptHash };
-                byte[] sgasHash = Storage.Get(Storage.CurrentContext, "sgas");
-                deleDyncall dyncall = (deleDyncall)sgasHash.ToDelegate();
-                BigInteger totalMoney = (BigInteger)dyncall("balanceOf", args);
-                BigInteger supplyMoney = Storage.Get(Storage.CurrentContext, "totalExchargeSgas").AsBigInteger();
-
-                BigInteger canDrawMax = totalMoney - supplyMoney;
-                if (count <= 0 || count > canDrawMax)
-                {
-                    count = canDrawMax;
-                }
-
-                args = new object[3] { ExecutionEngine.ExecutingScriptHash, ContractOwner, count };
-
-                deleDyncall dyncall2 = (deleDyncall)sgasHash.ToDelegate();
-                bool res = (bool)dyncall2("transfer_app", args);
-                if (!res)
-                {
-                    return false;
-                }
-
-                _subTotal(count);
-                return true;
-            }
-            return false;
-        }
-
-        public static bool buyDiamond(byte[] sender, BigInteger sgascount, BigInteger diamondcount)
-        {
-            if (sender.Length != 20) return false;
-            if (!Runtime.CheckWitness(sender)) return false;
-            var keytsender = new byte[] { 0x11 }.Concat(sender);
-            BigInteger nMoney = 0;
-            byte[] ownerMoney = Storage.Get(Storage.CurrentContext, keytsender);
-            if (ownerMoney.Length > 0)
-            {
-                nMoney = ownerMoney.AsBigInteger();
-            }
-            else
-            {
-                nMoney = 0;
-            }
-            if (nMoney < sgascount)
-            {
-                return false;
-            }
-            nMoney -= sgascount;
-            var args = new object[3] { ExecutionEngine.ExecutingScriptHash, ContractOwner, sgascount };
-            byte[] sgasHash = Storage.Get(Storage.CurrentContext, "sgas");
-            deleDyncall dyncall2 = (deleDyncall)sgasHash.ToDelegate();
-            bool res = (bool)dyncall2("transfer_app", args);
-            if (!res) return false;
-
-            _subTotal(sgascount);
-            if (nMoney > 0)
-            {
-                Storage.Put(Storage.CurrentContext, keytsender, nMoney.AsByteArray());
-            }
-            else
-            {
-                Storage.Delete(Storage.CurrentContext, keytsender);
-            }
-            return transfer(ExecutionEngine.ExecutingScriptHash, sender, diamondcount);
         }
 
         public static bool consumeDiamond(byte[] sender, BigInteger diamondcount)
         {
             if (sender.Length != 20) return false;
             if (!Runtime.CheckWitness(sender)) return false;
-            BigInteger nMoney = 0;
-            byte[] ownerMoney = Storage.Get(Storage.CurrentContext, sender);
-            if (ownerMoney.Length > 0)
-            {
-                nMoney = ownerMoney.AsBigInteger();
-            }
-            else
-            {
-                nMoney = 0;
-            }
-
-            if (nMoney < diamondcount) return false;
-            return transfer(sender, ExecutionEngine.ExecutingScriptHash, diamondcount);
+            return transferFrom_app(sender, ContractOwner, diamondcount);
         }
-
         public static bool setInfo(string type, string roomroundid, string hash)
         {
             var key = concatKey(type, roomroundid);
             Storage.Put(Storage.CurrentContext, key, hash);
             return true;
         }
-
         public static string getInfo(string type, string roomroundid)
         {
             var key = concatKey(type, roomroundid);
@@ -433,15 +317,55 @@ namespace MJContract
         {
             if (Runtime.Trigger == TriggerType.Verification)
             {
-                if (ContractOwner.Length == 20)
+                var tx = ExecutionEngine.ScriptContainer as Transaction;
+                var curhash = ExecutionEngine.ExecutingScriptHash;
+                var inputs = tx.GetInputs();
+                var outputs = tx.GetOutputs();
+
+                for (var i = 0; i < inputs.Length; i++)
                 {
-                    return Runtime.CheckWitness(ContractOwner);
+                    byte[] coinid = inputs[i].PrevHash.Concat(new byte[] { 0, 0 });
+                    if (inputs[i].PrevIndex == 0)
+                    {
+                        byte[] target = Storage.Get(Storage.CurrentContext, coinid);
+                        if (target.Length > 0)
+                        {
+                            if (inputs.Length > 1 || outputs.Length != 1)
+                                return false;
+
+                            if (outputs[0].ScriptHash.AsBigInteger() == target.AsBigInteger())
+                                return true;
+                            else
+                                return false;
+                        }
+                    }
                 }
-                else if (ContractOwner.Length == 33)
+                var refs = tx.GetReferences();
+                BigInteger inputcount = 0;
+                for (var i = 0; i < refs.Length; i++)
                 {
-                    byte[] signature = method.AsByteArray();
-                    return VerifySignature(signature, ContractOwner);
+                    if (refs[i].AssetId.AsBigInteger() != gas_asset_id.AsBigInteger())
+                        return false;
+
+                    if (refs[i].ScriptHash.AsBigInteger() != curhash.AsBigInteger())
+                        return false;
+
+                    inputcount += refs[i].Value;
                 }
+
+                BigInteger outputcount = 0;
+                for (var i = 0; i < outputs.Length; i++)
+                {
+                    if (outputs[i].ScriptHash.AsBigInteger() != curhash.AsBigInteger())
+                    {
+                        return false;
+                    }
+                    outputcount += outputs[i].Value;
+                }
+                if (outputcount != inputcount)
+                    return false;
+
+                return true;
             }
             else if (Runtime.Trigger == TriggerType.VerificationR)
             {
@@ -451,122 +375,55 @@ namespace MJContract
             {
                 var callscript = ExecutionEngine.CallingScriptHash;
 
-                if (method == "_setSgas")
+                if (method == "_getGas")
                 {
-                    if (!Runtime.CheckWitness(ContractOwner)) return false;
-                    Storage.Put(Storage.CurrentContext, "sgas", (byte[])args[0]);
-                    return true;
-                }
-                if (method == "_getSgas")
-                {
-                    return Storage.Get(Storage.CurrentContext, "sgas");
+                    if (args.Length != 1) return 0;
+                    byte[] account = (byte[])args[0];
+                    return _getGas(account);
                 }
                 if (method == "deploy")
                 {
-                    if (!Runtime.CheckWitness(ContractOwner)) return false;
                     return Deploy();
                 }
-                if (method == "totalExchargeSgas") return totalExchargeSgas();
+                if (method == "_totalSupply") return _totalSupply();
                 if (method == "totalSupply") return totalSupply();
                 if (method == "version") return Version();
                 if (method == "name") return Name();
                 if (method == "decimals") return decimals();
                 if (method == "balanceOf")
                 {
-                    if (args.Length != 1) return false;
+                    if (args.Length != 1) return 0;
                     byte[] account = (byte[])args[0];
-
                     return balanceOf(account);
                 }
-                if (method == "balanceOf_Sgas")
+                if (method == "mintTokens")
                 {
-                    if (args.Length != 1) return false;
-                    byte[] account = (byte[])args[0];
-
-                    return balanceOf_Sgas(account);
+                    if (args.Length != 0) return 0;
+                    return mintTokens();
                 }
-                if (method == "transfer")
+                if (method == "refund")
                 {
-                    if (args.Length != 3) return false;
-
-                    var from = (byte[])args[0];
-                    var to = (byte[])args[1];
-                    var value = (BigInteger)args[2];
-
-                    if (!Runtime.CheckWitness(from)) return false;
-                    if (ExecutionEngine.EntryScriptHash.AsBigInteger() != callscript.AsBigInteger()) return false;
-
-                    return transfer(from, to, value);
+                    if (args.Length != 1) return 0;
+                    byte[] who = (byte[])args[0];
+                    if (!Runtime.CheckWitness(who))
+                        return false;
+                    return refund(who);
                 }
-                if (method == "transferFrom_app")
+                if (method == "getRefundTarget")
                 {
-                    if (args.Length != 3) return false;
-
-                    byte[] from = (byte[])args[0];
-                    byte[] to = (byte[])args[1];
-                    BigInteger tokenId = (BigInteger)args[2];
-
-                    if (!Runtime.CheckWitness(from)) return false;
-                    if (to != ContractOwner) return false;
-
-                    return transfer(from, to, tokenId);
+                    if (args.Length != 1) return 0;
+                    byte[] hash = (byte[])args[0];
+                    return getRefundTarget(hash);
                 }
                 if (method == "getTXInfo")
                 {
-                    if (args.Length != 1) return false;
+                    if (args.Length != 1) return 0;
                     byte[] txid = (byte[])args[0];
-
                     return getTXInfo(txid);
-                }
-                if (method == "changeSupply")
-                {
-                    if (args.Length != 1) return false;
-                    byte[] txid = (byte[])args[0];
-
-                    return changeSupply(txid);
-                }
-                if (method == "drawToken")
-                {
-                    if (args.Length != 2) return false;
-                    byte[] owner = (byte[])args[0];
-                    BigInteger count = (BigInteger)args[1];
-
-                    return drawToken(owner, count);
-                }
-                if (method == "drawToContractOwner")
-                {
-                    if (args.Length != 1) return false;
-                    BigInteger count = (BigInteger)args[0];
-
-                    return drawToContractOwner(count);
-                }
-                if (method == "rechargeToken")
-                {
-                    if (args.Length != 2) return false;
-                    byte[] owner = (byte[])args[0];
-                    byte[] txid = (byte[])args[1];
-
-                    return rechargeToken(owner, txid);
-                }
-                if (method == "hasAlreadyCharged")
-                {
-                    if (args.Length != 1) return false;
-                    byte[] txid = (byte[])args[0];
-
-                    return hasAlreadyCharged(txid);
-                }
-                if (method == "buyDiamond")
-                {
-                    if (args.Length != 3) return false;
-                    byte[] owner = (byte[])args[0];
-                    BigInteger sgascount = (BigInteger)args[1];
-                    BigInteger diamondcount = (BigInteger)args[2];
-
-                    return buyDiamond(owner, sgascount, diamondcount);
                 }
                 if (method == "consumeDiamond")
                 {
-                    if (args.Length != 2) return false;
+                    if (args.Length != 2) return 0;
                     byte[] owner = (byte[])args[0];
                     BigInteger diamondcount = (BigInteger)args[1];
 
@@ -574,7 +431,7 @@ namespace MJContract
                 }
                 if (method == "setInfo")
                 {
-                    if (args.Length != 3) return false;
+                    if (args.Length != 3) return 0;
                     string type = (string)args[0];
                     string roomroundid = (string)args[1];
                     string hash = (string)args[2];
@@ -583,12 +440,13 @@ namespace MJContract
                 }
                 if (method == "getInfo")
                 {
-                    if (args.Length != 2) return false;
+                    if (args.Length != 2) return 0;
                     string type = (string)args[0];
                     string roomroundid = (string)args[1];
 
                     return getInfo(type, roomroundid);
                 }
+                #region 升级合约,耗费490,仅限管理员
                 if (method == "upgrade")
                 {
                     if (!Runtime.CheckWitness(ContractOwner))
@@ -607,9 +465,9 @@ namespace MJContract
                     bool need_storage = (bool)(object)05;
                     string name = "MJ";
                     string version = "1";
-                    string author = "MJ";
-                    string email = "MJ";
-                    string description = "MJC";
+                    string author = "NEL";
+                    string email = "0";
+                    string description = "gas与sgas的互换";
 
                     if (args.Length == 9)
                     {
@@ -625,6 +483,7 @@ namespace MJContract
                     Contract.Migrate(new_script, parameter_list, return_type, need_storage, name, version, author, email, description);
                     return true;
                 }
+                #endregion
             }
             return false;
         }
