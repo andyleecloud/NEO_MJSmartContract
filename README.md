@@ -33,3 +33,4 @@
 	* 完整支持MQTT V3.1/V3.1.1协议规范，扩展支持WebSocket、Stomp、CoAP、MQTT-SN或私有TCP协议
 	* 按主题树(Topic Trie)和路由表(Routing Table)发布订阅模式在集群节点间转发路由MQTT消息
 
+* 不仅限于手机 app, 可在 web 上搭配 websocket 使用 mqtt 协议
